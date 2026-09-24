@@ -98,8 +98,8 @@ with st.form("contact_form", clear_on_submit=False):
 
         mobile = st.text_input(
             "Mobile No.",
-            placeholder="+91 XXXXX XXXXX",
-            help = "Enter the number with country code, e.g. +919876543210"
+            placeholder="+91XXXXXXXXXX",
+            help = "Enter the number    with country code, e.g. +919876543210"
         )
 
     with col2:
