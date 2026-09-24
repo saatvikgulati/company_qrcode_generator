@@ -92,7 +92,6 @@ with st.form("contact_form", clear_on_submit=False):
             "B.S.D. Marg, Off Govandi Station Road, Mumbai 400088, "
             "Maharashtra, India"
         ),
-        disabled=True
     )
 
     presence = st.text_input(
