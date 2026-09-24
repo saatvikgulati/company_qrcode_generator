@@ -1,7 +1,6 @@
 import streamlit as st
 import segno
 from PIL import Image
-import json
 import io
 import os
 
