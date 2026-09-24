@@ -1,6 +1,7 @@
 import streamlit as st
 import segno
 from PIL import Image
+from pathlib import Path
 import io
 import os
 
@@ -185,8 +186,7 @@ if submitted:
             # -------------------------------------------------
             # Add center logo
             # -------------------------------------------------
-
-            logo_path = "images/logo.png"
+            logo_path = Path(__file__).resolve().parent / 'images' / 'logo.png'
 
             if os.path.exists(logo_path):
 
