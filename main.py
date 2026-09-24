@@ -81,6 +81,28 @@ def validate_phone_number(phone):
 
     return True, ""
 
+def validate_email(p_email):
+    """
+    Validate that the email address belongs to totalmovements.com.
+    """
+
+    p_email = p_email.strip().lower()
+
+    if not p_email:
+        return True, ""
+
+    # Basic email format + required domain
+    if not re.fullmatch(
+        r"[A-Za-z0-9._%+-]+@totalmovements\.com",
+        p_email
+    ):
+        return False, (
+            "Email address must be a valid @totalmovements.com email address. "
+            "Example: name@totalmovements.com"
+        )
+
+    return True, ""
+
 
 # ---------------------------------------------------------
 # Contact form
@@ -167,8 +189,11 @@ if submitted:
 
     else:
         phone_valid,phone_error = validate_phone_number(mobile)
+        email_valid,email_error = validate_email(email)
         if not phone_valid:
             st.error(f"⚠️ {phone_error}")
+        elif not email_valid:
+            st.error(f"⚠️ {email_error}")
         else:
             try:
                 note_parts = []
