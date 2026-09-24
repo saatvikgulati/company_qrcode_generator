@@ -4,6 +4,7 @@ from PIL import Image
 from pathlib import Path
 import io
 import os
+import re
 
 
 # ---------------------------------------------------------
@@ -42,6 +43,43 @@ def escape_vcard(value):
         .replace("\n", "\\n")
         .replace("\r", "")
     )
+def validate_phone_number(phone):
+    """
+    Validate an international phone number.
+
+    Expected format:
+    +<country code><phone number>
+
+    Example:
+    +919876543210
+    +971501234567
+    +12125551234
+    """
+
+    phone = phone.strip()
+
+    # Must start with +
+    if not phone.startswith("+"):
+        return False, "Mobile number must include the country code and start with '+'."
+
+    # Only + followed by digits
+    if not re.fullmatch(r"\+[0-9]+", phone):
+        return False, (
+            "Mobile number can contain only '+' followed by digits. "
+            "Example: +919876543210"
+        )
+
+    # E.164 maximum length is 15 digits excluding +
+    digit_count = len(phone) - 1
+
+    if digit_count > 15:
+        return False, "Mobile number is too long. Maximum is 15 digits."
+
+    # Basic minimum length
+    if digit_count < 8:
+        return False, "Please enter a valid international mobile number."
+
+    return True, ""
 
 
 # ---------------------------------------------------------
@@ -60,7 +98,8 @@ with st.form("contact_form", clear_on_submit=False):
 
         mobile = st.text_input(
             "Mobile No.",
-            placeholder="+91 XXXXX XXXXX"
+            placeholder="+91 XXXXX XXXXX",
+            help = "Enter the number with country code, e.g. +919876543210"
         )
 
     with col2:
@@ -127,148 +166,151 @@ if submitted:
         )
 
     else:
+        phone_valid,phone_error = validate_phone_number(mobile)
+        if not phone_valid:
+            st.error(f"⚠️ {phone_error}")
+        else:
+            try:
 
-        try:
+                # -------------------------------------------------
+                # Build vCard 3.0
+                # -------------------------------------------------
 
-            # -------------------------------------------------
-            # Build vCard 3.0
-            # -------------------------------------------------
-
-            vcard_data = (
-                "BEGIN:VCARD\r\n"
-                "VERSION:3.0\r\n"
-                f"N:{escape_vcard(last_name)};"
-                f"{escape_vcard(first_name)};;;\r\n"
-                f"FN:{escape_vcard(first_name)} "
-                f"{escape_vcard(last_name)}\r\n"
-                f"TEL;TYPE=CELL:{escape_vcard(mobile)}\r\n"
-                f"EMAIL;TYPE=INTERNET:{escape_vcard(email)}\r\n"
-                f"URL:{escape_vcard(website)}\r\n"
-                f"ADR;TYPE=WORK:;;"
-                f"{escape_vcard(office_address)};;;;\r\n"
-                f"NOTE:{escape_vcard(
-                    'WeChat ID: ' + wechat +
-                    '\\nPresence: ' + presence
-                )}\r\n"
-                "END:VCARD\r\n"
-            )
-
-            # -------------------------------------------------
-            # Generate QR
-            # -------------------------------------------------
-
-            qr = segno.make(
-                vcard_data,
-                error="H",
-                micro=False
-            )
-
-            # -------------------------------------------------
-            # Render QR to PNG
-            # -------------------------------------------------
-
-            qr_buffer = io.BytesIO()
-
-            qr.save(
-                qr_buffer,
-                kind="png",
-                scale=10,
-                border=4,
-                dark=BRAND_RED,
-                light="#FFFFFF"
-            )
-
-            qr_buffer.seek(0)
-
-            qr_img = Image.open(qr_buffer).convert("RGBA")
-
-            # -------------------------------------------------
-            # Add center logo
-            # -------------------------------------------------
-            logo_path = Path(__file__).resolve().parent / 'images' / 'logo.png'
-
-            if os.path.exists(logo_path):
-
-                logo = Image.open(logo_path).convert("RGBA")
-
-                # Logo approximately 18% of QR width
-                max_logo_width = int(qr_img.width * 0.18)
-                max_logo_height = int(qr_img.height * 0.18)
-
-                logo.thumbnail(
-                    (max_logo_width, max_logo_height),
-                    Image.Resampling.LANCZOS
+                vcard_data = (
+                    "BEGIN:VCARD\r\n"
+                    "VERSION:3.0\r\n"
+                    f"N:{escape_vcard(last_name)};"
+                    f"{escape_vcard(first_name)};;;\r\n"
+                    f"FN:{escape_vcard(first_name)} "
+                    f"{escape_vcard(last_name)}\r\n"
+                    f"TEL;TYPE=CELL:{escape_vcard(mobile)}\r\n"
+                    f"EMAIL;TYPE=INTERNET:{escape_vcard(email)}\r\n"
+                    f"URL:{escape_vcard(website)}\r\n"
+                    f"ADR;TYPE=WORK:;;"
+                    f"{escape_vcard(office_address)};;;;\r\n"
+                    f"NOTE:{escape_vcard(
+                        'WeChat ID: ' + wechat +
+                        '\\nPresence: ' + presence
+                    )}\r\n"
+                    "END:VCARD\r\n"
                 )
 
-                # White background around logo
-                padding = 12
+                # -------------------------------------------------
+                # Generate QR
+                # -------------------------------------------------
 
-                logo_bg = Image.new(
-                    "RGBA",
-                    (
-                        logo.width + padding * 2,
-                        logo.height + padding * 2
-                    ),
-                    "white"
+                qr = segno.make(
+                    vcard_data,
+                    error="H",
+                    micro=False
                 )
 
-                logo_bg.alpha_composite(
-                    logo,
-                    (padding, padding)
+                # -------------------------------------------------
+                # Render QR to PNG
+                # -------------------------------------------------
+
+                qr_buffer = io.BytesIO()
+
+                qr.save(
+                    qr_buffer,
+                    kind="png",
+                    scale=10,
+                    border=4,
+                    dark=BRAND_RED,
+                    light="#FFFFFF"
                 )
 
-                # Center logo
-                x = (qr_img.width - logo_bg.width) // 2
-                y = (qr_img.height - logo_bg.height) // 2
+                qr_buffer.seek(0)
 
-                qr_img.alpha_composite(
-                    logo_bg,
-                    (x, y)
+                qr_img = Image.open(qr_buffer).convert("RGBA")
+
+                # -------------------------------------------------
+                # Add center logo
+                # -------------------------------------------------
+                logo_path = Path(__file__).resolve().parent / 'images' / 'logo.png'
+
+                if os.path.exists(logo_path):
+
+                    logo = Image.open(logo_path).convert("RGBA")
+
+                    # Logo approximately 18% of QR width
+                    max_logo_width = int(qr_img.width * 0.18)
+                    max_logo_height = int(qr_img.height * 0.18)
+
+                    logo.thumbnail(
+                        (max_logo_width, max_logo_height),
+                        Image.Resampling.LANCZOS
+                    )
+
+                    # White background around logo
+                    padding = 12
+
+                    logo_bg = Image.new(
+                        "RGBA",
+                        (
+                            logo.width + padding * 2,
+                            logo.height + padding * 2
+                        ),
+                        "white"
+                    )
+
+                    logo_bg.alpha_composite(
+                        logo,
+                        (padding, padding)
+                    )
+
+                    # Center logo
+                    x = (qr_img.width - logo_bg.width) // 2
+                    y = (qr_img.height - logo_bg.height) // 2
+
+                    qr_img.alpha_composite(
+                        logo_bg,
+                        (x, y)
+                    )
+
+                else:
+
+                    st.warning(
+                        "⚠️ 'logo.png' was not detected. "
+                        "Generated a QR code without the center logo."
+                    )
+
+                # -------------------------------------------------
+                # Convert final image to PNG bytes
+                # -------------------------------------------------
+
+                img_buffer = io.BytesIO()
+
+                qr_img.save(
+                    img_buffer,
+                    format="PNG"
                 )
 
-            else:
+                img_bytes = img_buffer.getvalue()
 
-                st.warning(
-                    "⚠️ 'logo.png' was not detected. "
-                    "Generated a QR code without the center logo."
+                # -------------------------------------------------
+                # Store QR in session state
+                # -------------------------------------------------
+
+                st.session_state["qr_image"] = img_bytes
+                st.session_state["qr_filename"] = (
+                    f"TotalMovements_"
+                    f"{first_name}_{last_name}_QR.png"
+                )
+                st.session_state["qr_caption"] = (
+                    f"Total Movements Card: "
+                    f"{first_name} {last_name}"
                 )
 
-            # -------------------------------------------------
-            # Convert final image to PNG bytes
-            # -------------------------------------------------
+                st.success(
+                    "✅ QR Code generated successfully!"
+                )
 
-            img_buffer = io.BytesIO()
+            except Exception as e:
 
-            qr_img.save(
-                img_buffer,
-                format="PNG"
-            )
-
-            img_bytes = img_buffer.getvalue()
-
-            # -------------------------------------------------
-            # Store QR in session state
-            # -------------------------------------------------
-
-            st.session_state["qr_image"] = img_bytes
-            st.session_state["qr_filename"] = (
-                f"TotalMovements_"
-                f"{first_name}_{last_name}_QR.png"
-            )
-            st.session_state["qr_caption"] = (
-                f"Total Movements Card: "
-                f"{first_name} {last_name}"
-            )
-
-            st.success(
-                "✅ QR Code generated successfully!"
-            )
-
-        except Exception as e:
-
-            st.error(
-                f"An unexpected technical problem occurred: {e}"
-            )
+                st.error(
+                    f"An unexpected technical problem occurred: {e}"
+                )
 
 
 # ---------------------------------------------------------
