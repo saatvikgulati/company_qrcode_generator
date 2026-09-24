@@ -171,6 +171,15 @@ if submitted:
             st.error(f"⚠️ {phone_error}")
         else:
             try:
+                note_parts = []
+
+                if wechat:
+                    note_parts.append(f'WeChat ID: {wechat}')
+
+                if presence:
+                    note_parts.append(f'Presence: {presence}')
+
+                note = '\n'.join(note_parts)
 
                 # -------------------------------------------------
                 # Build vCard 3.0
@@ -188,10 +197,7 @@ if submitted:
                     f"URL:{escape_vcard(website)}\r\n"
                     f"ADR;TYPE=WORK:;;"
                     f"{escape_vcard(office_address)};;;;\r\n"
-                    f"NOTE:{escape_vcard(
-                        'WeChat ID: ' + wechat +
-                        '\\nPresence: ' + presence
-                    )}\r\n"
+                    f"NOTE:{escape_vcard(note)}\r\n"
                     "END:VCARD\r\n"
                 )
 
