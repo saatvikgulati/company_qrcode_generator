@@ -193,7 +193,7 @@ if submitted:
                     f"FN:{escape_vcard(first_name)} "
                     f"{escape_vcard(last_name)}\r\n"
                     f"TEL;TYPE=CELL:{escape_vcard(mobile)}\r\n"
-                    f"EMAIL;TYPE=INTERNET:{escape_vcard(email)}\r\n"
+                    f"EMAIL;TYPE=Work:{escape_vcard(email)}\r\n"
                     f"URL:{escape_vcard(website)}\r\n"
                     f"ADR;TYPE=WORK:;;"
                     f"{escape_vcard(office_address)};;;;\r\n"
