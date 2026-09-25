@@ -5,6 +5,7 @@ from pathlib import Path
 import io
 import os
 import re
+import itertools
 
 
 # ---------------------------------------------------------
@@ -27,7 +28,7 @@ BRAND_RED = "#B31F41"
 
 
 # ---------------------------------------------------------
-# Helper function
+# Helper functions
 # ---------------------------------------------------------
 
 def escape_vcard(value):
@@ -43,6 +44,8 @@ def escape_vcard(value):
         .replace("\n", "\\n")
         .replace("\r", "")
     )
+
+
 def validate_phone_number(phone):
     """
     Validate an international phone number.
@@ -60,12 +63,12 @@ def validate_phone_number(phone):
 
     # Must start with +
     if not phone.startswith("+"):
-        return False, "Mobile number must include the country code and start with '+'."
+        return False, "must include the country code and start with '+'."
 
     # Only + followed by digits
     if not re.fullmatch(r"\+[0-9]+", phone):
         return False, (
-            "Mobile number can contain only '+' followed by digits. "
+            "can contain only '+' followed by digits. "
             "Example: +919876543210"
         )
 
@@ -73,13 +76,14 @@ def validate_phone_number(phone):
     digit_count = len(phone) - 1
 
     if digit_count > 15:
-        return False, "Mobile number is too long. Maximum is 15 digits."
+        return False, "is too long. Maximum is 15 digits."
 
     # Basic minimum length
     if digit_count < 8:
-        return False, "Please enter a valid international mobile number."
+        return False, "is not a valid international mobile number."
 
     return True, ""
+
 
 def validate_email(p_email):
     """
@@ -104,65 +108,143 @@ def validate_email(p_email):
     return True, ""
 
 
+def looks_like_phone_number(value):
+    """
+    Heuristic used only for WeChat entries: does this value look like
+    a phone number (digits, optional '+', spaces/dashes) rather than
+    a WeChat ID such as 'wxid_xxxxxx'? Numbers get shown as a real
+    contact entry; IDs go into Notes since a phone field shouldn't
+    hold non-numeric text.
+    """
+    cleaned = re.sub(r"[\s\-]", "", value.strip())
+    return bool(re.fullmatch(r"\+?[0-9]{6,15}", cleaned))
+
+
 # ---------------------------------------------------------
-# Contact form
+# Dynamic mobile-number rows (kept OUTSIDE any st.form,
+# since add/remove buttons need to rerun immediately)
 # ---------------------------------------------------------
 
-with st.form("contact_form", clear_on_submit=False):
-    
-    col1, col2 = st.columns(2)
+if "mobile_id_counter" not in st.session_state:
+    st.session_state.mobile_id_counter = itertools.count(1)
 
-    with col1:
-        first_name = st.text_input(
-            "First Name",
-            placeholder="John"
+if "mobile_ids" not in st.session_state:
+    st.session_state.mobile_ids = [next(st.session_state.mobile_id_counter)]
+
+
+def add_mobile_row():
+    st.session_state.mobile_ids.append(next(st.session_state.mobile_id_counter))
+
+
+def remove_mobile_row(mobile_id):
+    st.session_state.mobile_ids.remove(mobile_id)
+    st.session_state.pop(f"mobile_number_{mobile_id}", None)
+    st.session_state.pop(f"mobile_type_{mobile_id}", None)
+
+
+# ---------------------------------------------------------
+# Contact details
+# ---------------------------------------------------------
+
+col1, col2 = st.columns(2)
+
+with col1:
+    first_name = st.text_input(
+        "First Name",
+        placeholder="John"
+    )
+
+with col2:
+    last_name = st.text_input(
+        "Last Name",
+        placeholder="Doe"
+    )
+
+email = st.text_input(
+    "Email Address",
+    placeholder="name@totalmovements.com"
+)
+
+website = st.text_input(
+    "Website",
+    value="https://totalmovements.com",
+    disabled=True
+)
+
+office_address = st.text_area(
+    "Office Address",
+    value=(
+        "402, Malhotra Chambers, Arvind Vithal Gandhi Chowk, "
+        "B.S.D. Marg, Off Govandi Station Road, Mumbai 400088, "
+        "Maharashtra, India"
+    ),
+)
+
+presence = st.text_input(
+    'Presence',
+    value='INDIA | UAE | SAUDI | USA | MALAYSIA | INDONESIA | BANGLADESH'
+)
+
+
+# ---------------------------------------------------------
+# Mobile numbers section
+# ---------------------------------------------------------
+
+st.markdown("**Mobile Numbers**")
+st.caption(
+    "Add one or more numbers with country code (e.g. +919876543210) "
+    "and mark each as Work or WeChat."
+)
+
+for mobile_id in list(st.session_state.mobile_ids):
+
+    # Look up this row's currently selected type (already updated in
+    # session_state by the time this runs, even on the rerun triggered
+    # by changing the selectbox itself) so we can adapt the number
+    # field's placeholder/help text and, later, its validation rules.
+    current_type = st.session_state.get(f"mobile_type_{mobile_id}", "Work")
+
+    row_col1, row_col2, row_col3 = st.columns([3, 2, 1])
+
+    with row_col1:
+        if current_type == "WeChat":
+            st.text_input(
+                "Mobile No.",
+                key=f"mobile_number_{mobile_id}",
+                placeholder="wxid_xxxxxx or WeChat mobile number",
+                help="WeChat ID or number — no country-code format required.",
+            )
+        else:
+            st.text_input(
+                "Mobile No.",
+                key=f"mobile_number_{mobile_id}",
+                placeholder="+91XXXXXXXXXX",
+                help="Enter the number with country code, e.g. +919876543210",
+            )
+
+    with row_col2:
+        st.selectbox(
+            "Type",
+            options=["Work", "WeChat"],
+            key=f"mobile_type_{mobile_id}",
         )
 
-        mobile = st.text_input(
-            "Mobile No.",
-            placeholder="+91XXXXXXXXXX",
-            help = "Enter the number    with country code, e.g. +919876543210"
-        )
+    with row_col3:
+        st.markdown("&nbsp;", unsafe_allow_html=True)  # align button with inputs
+        if len(st.session_state.mobile_ids) > 1:
+            st.button(
+                "✖",
+                key=f"remove_btn_{mobile_id}",
+                on_click=remove_mobile_row,
+                args=(mobile_id,),
+                help="Remove this number"
+            )
 
-    with col2:
-        last_name = st.text_input(
-            "Last Name",
-            placeholder="Doe"
-        )
+st.button("➕ Add another mobile number", on_click=add_mobile_row)
 
-        wechat = st.text_input(
-            "WeChat ID",
-            placeholder="wxid_xxxxxx"
-        )
+st.divider()
 
-    email = st.text_input(
-        "Email Address",
-        placeholder="name@totalmovements.com"
-    )
-
-    website = st.text_input(
-        "Website",
-        value="https://totalmovements.com",
-        disabled=True
-    )
-
-    office_address = st.text_area(
-        "Office Address",
-        value=(
-            "402, Malhotra Chambers, Arvind Vithal Gandhi Chowk, "
-            "B.S.D. Marg, Off Govandi Station Road, Mumbai 400088, "
-            "Maharashtra, India"
-        ),
-    )
-
-    presence = st.text_input(
-        'Presence',
-        value='INDIA | UAE | SAUDI | USA | MALAYSIA | INDONESIA | BANGLADESH'
-    )
-
-    submitted = st.form_submit_button(
-        "Generate Designer QR Code"
-    )
+submitted = st.button("Generate Designer QR Code", type="primary")
 
 
 # ---------------------------------------------------------
@@ -174,32 +256,79 @@ if submitted:
     # Normalize possible None values
     first_name = first_name or ""
     last_name = last_name or ""
-    mobile = mobile or ""
-    wechat = wechat or ""
     email = email or ""
     presence = presence or ""
 
+    # Gather mobile entries from session state
+    mobile_entries = []
+    for mobile_id in st.session_state.mobile_ids:
+        number = (st.session_state.get(f"mobile_number_{mobile_id}", "") or "").strip()
+        mtype = st.session_state.get(f"mobile_type_{mobile_id}", "Work")
+        if number:
+            mobile_entries.append({"number": number, "type": mtype})
+
     # Validate required fields
-    if not first_name or not last_name or not mobile:
+    if not first_name or not last_name or not mobile_entries:
 
         st.error(
-            "⚠️ First Name, Last Name, and Mobile Number "
+            "⚠️ First Name, Last Name, and at least one Mobile Number "
             "are required fields!"
         )
 
     else:
-        phone_valid,phone_error = validate_phone_number(mobile)
-        email_valid,email_error = validate_email(email)
-        if not phone_valid:
-            st.error(f"⚠️ {phone_error}")
-        elif not email_valid:
-            st.error(f"⚠️ {email_error}")
+        errors = []
+
+        # Only Work-type numbers are validated as international
+        # phone numbers. WeChat entries can be an ID or a number in
+        # any format, so no country-code check is applied to them.
+        for entry in mobile_entries:
+            if entry["type"] == "Work":
+                phone_valid, phone_error = validate_phone_number(entry["number"])
+                if not phone_valid:
+                    errors.append(f"'{entry['number']}' (Work) {phone_error}")
+
+        email_valid, email_error = validate_email(email)
+        if not email_valid:
+            errors.append(email_error)
+
+        if errors:
+            for err in errors:
+                st.error(f"⚠️ {err}")
         else:
             try:
+                # -------------------------------------------------
+                # Build TEL lines.
+                #
+                # Work numbers: standard TYPE=CELL,WORK.
+                #
+                # WeChat numbers: TYPE=WECHAT only (no CELL alongside
+                # it). If a standard type like CELL is included in
+                # the same TYPE list, most Android contact apps match
+                # that recognized token first and show "Mobile"
+                # instead of the custom one. With only an unrecognized
+                # type present, apps typically fall back to showing
+                # the literal token as the label ("Wechat").
+                #
+                # WeChat IDs (non-numeric, e.g. "wxid_xxxxxx") aren't
+                # valid phone field content, so those stay in NOTE
+                # instead of becoming a TEL entry.
+                # -------------------------------------------------
+
+                tel_lines = []
                 note_parts = []
 
-                if wechat:
-                    note_parts.append(f'WeChat ID: {wechat}')
+                for entry in mobile_entries:
+                    if entry["type"] == "WeChat":
+                        if looks_like_phone_number(entry["number"]):
+                            number = escape_vcard(entry["number"])
+                            tel_lines.append(f"TEL;TYPE=WeChat:{number}\r\n")
+                        else:
+                            note_parts.append(f'WeChat ID: {entry["number"]}')
+                    else:
+                        number = escape_vcard(entry["number"])
+                        tel_lines.append(f"TEL;TYPE=CELL,WORK:{number}\r\n")
+
+                tel_block = "".join(tel_lines)
 
                 if presence:
                     note_parts.append(f'Presence: {presence}')
@@ -217,7 +346,7 @@ if submitted:
                     f"{escape_vcard(first_name)};;;\r\n"
                     f"FN:{escape_vcard(first_name)} "
                     f"{escape_vcard(last_name)}\r\n"
-                    f"TEL;TYPE=CELL:{escape_vcard(mobile)}\r\n"
+                    f"{tel_block}"
                     f"EMAIL;TYPE=WORK:{escape_vcard(email)}\r\n"
                     f"URL:{escape_vcard(website)}\r\n"
                     f"ADR;TYPE=WORK:;;"
@@ -346,7 +475,6 @@ if submitted:
 
 # ---------------------------------------------------------
 # DISPLAY QR + DOWNLOAD BUTTON
-# IMPORTANT: OUTSIDE st.form()
 # ---------------------------------------------------------
 
 if "qr_image" in st.session_state:
