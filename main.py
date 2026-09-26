@@ -2,10 +2,12 @@ import streamlit as st
 import segno
 from PIL import Image
 from pathlib import Path
+from dataclasses import dataclass
 import io
 import os
 import re
-import itertools
+
+import config
 
 
 # ---------------------------------------------------------
@@ -24,11 +26,9 @@ st.write(
     "contact vCard QR code."
 )
 
-BRAND_RED = "#B31F41"
-
 
 # ---------------------------------------------------------
-# Helper functions
+# General helpers
 # ---------------------------------------------------------
 
 def escape_vcard(value):
@@ -87,7 +87,7 @@ def validate_phone_number(phone):
 
 def validate_email(p_email):
     """
-    Validate that the email address belongs to totalmovements.com.
+    Validate that the email address belongs to the allowed domain.
     """
 
     p_email = p_email.strip().lower()
@@ -96,28 +96,270 @@ def validate_email(p_email):
         return True, ""
 
     # Basic email format + required domain
-    if not re.fullmatch(
-        r"[A-Za-z0-9._%+-]+@totalmovements\.com",
-        p_email
-    ):
+    pattern = r"[A-Za-z0-9._%+-]+@" + re.escape(config.ALLOWED_EMAIL_DOMAIN)
+    if not re.fullmatch(pattern, p_email):
         return False, (
-            "Email address must be a valid @totalmovements.com email address. "
-            "Example: name@totalmovements.com"
+            f"Email address must be a valid @{config.ALLOWED_EMAIL_DOMAIN} "
+            f"email address. Example: name@{config.ALLOWED_EMAIL_DOMAIN}"
         )
 
     return True, ""
 
 
-def looks_like_phone_number(value):
+# ---------------------------------------------------------
+# MobileEntry: one mobile-number row, with the formatting/
+# validation rules for that single entry attached to it
+# ---------------------------------------------------------
+
+@dataclass
+class MobileEntry:
+    number: str
+    type: str  # "Work" or "WeChat"
+
+    def looks_like_phone_number(self):
+        """
+        Heuristic used only for WeChat entries: does this value look
+        like a phone number (digits, optional '+', spaces/dashes)
+        rather than a WeChat ID such as 'wxid_xxxxxx'? Numbers get
+        shown as a real contact entry; IDs go into Notes since a
+        phone field shouldn't hold non-numeric text.
+        """
+        cleaned = re.sub(r"[\s\-]", "", self.number.strip())
+        return bool(re.fullmatch(r"\+?[0-9]{6,15}", cleaned))
+
+    def is_dialable(self):
+        """Would this entry end up as an actual TEL line in the vCard?"""
+        return self.type == "Work" or self.looks_like_phone_number()
+
+    def validate(self):
+        """
+        Only Work-type numbers are validated as international phone
+        numbers. WeChat entries can be an ID or a number in any
+        format, so no country-code check is applied to them.
+        """
+        if self.type == "Work":
+            return validate_phone_number(self.number)
+        return True, ""
+
+    def to_tel_line(self):
+        """
+        The TEL line for this entry, or None if it belongs in NOTE
+        instead (a non-numeric WeChat ID).
+
+        WeChat numbers get TYPE=WeChat only (no CELL alongside it) so
+        contact apps show the custom "WeChat" label instead of
+        matching the recognized CELL token and showing "Mobile".
+        """
+        if self.type == "WeChat":
+            if self.looks_like_phone_number():
+                return f"TEL;TYPE=WeChat:{escape_vcard(self.number)}\r\n"
+            return None
+        return f"TEL;TYPE=CELL,WORK:{escape_vcard(self.number)}\r\n"
+
+    def note_line(self):
+        """A NOTE contribution for this entry (WeChat IDs only), else None."""
+        if self.type == "WeChat" and not self.looks_like_phone_number():
+            return f"WeChat ID: {self.number}"
+        return None
+
+    def dedup_key(self):
+        """Key used to detect duplicate entries, ignoring spaces/dashes/case."""
+        normalized_number = re.sub(r"[\s\-]", "", self.number.strip()).lower()
+        return self.type, normalized_number
+
+
+def dedupe_mobile_entries(entries):
     """
-    Heuristic used only for WeChat entries: does this value look like
-    a phone number (digits, optional '+', spaces/dashes) rather than
-    a WeChat ID such as 'wxid_xxxxxx'? Numbers get shown as a real
-    contact entry; IDs go into Notes since a phone field shouldn't
-    hold non-numeric text.
+    Remove duplicate mobile entries (same type + same number, ignoring
+    spaces/dashes/case) so the vCard doesn't end up with repeated TEL
+    lines from accidental double entry.
     """
-    cleaned = re.sub(r"[\s\-]", "", value.strip())
-    return bool(re.fullmatch(r"\+?[0-9]{6,15}", cleaned))
+    seen = set()
+    deduped = []
+    for entry in entries:
+        key = entry.dedup_key()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(entry)
+    return deduped
+
+
+def gather_mobile_entries():
+    """Collect non-empty mobile entries from session state, de-duplicated."""
+    entries = []
+    for i in st.session_state.mobile_ids:
+        number = (st.session_state.get(f"mobile_number_{i}", "") or "").strip()
+        mtype = st.session_state.get(f"mobile_type_{i}", "Work")
+        if number:
+            entries.append(MobileEntry(number=number, type=mtype))
+    return dedupe_mobile_entries(entries)
+
+
+# ---------------------------------------------------------
+# VCardBuilder: holds the full set of contact fields and
+# knows how to validate itself and produce vCard 3.0 text
+# ---------------------------------------------------------
+
+class VCardBuilder:
+
+    def __init__(self, f_name, l_name, email_addr, c_website, address,
+                 pres, mobiles):
+        self.first_name = f_name
+        self.last_name = l_name
+        self.email = email_addr
+        self.website = c_website
+        self.office_address = address
+        self.presence = pres
+        self.mobile_entries = mobiles  # list[MobileEntry], already de-duped
+
+    def validate(self):
+        """Return a list of error messages; an empty list means the data is ready to build."""
+        if not self.first_name or not self.last_name or not self.mobile_entries:
+            return [
+                "First Name, Last Name, and at least one Mobile Number "
+                "are required fields!"
+            ]
+
+        error_s= []
+
+        for entry in self.mobile_entries:
+            valid, error = entry.validate()
+            if not valid:
+                error_s.append(f"'{entry.number}' ({entry.type}) {error}")
+
+        email_valid, email_error = validate_email(self.email)
+        if not email_valid:
+            error_s.append(email_error)
+
+        # A vCard whose only mobile entries are non-numeric WeChat IDs
+        # (routed to NOTE, not TEL) would end up with no dialable
+        # number at all — require at least one entry that resolves to
+        # an actual TEL line.
+        if not any(entry.is_dialable() for entry in self.mobile_entries):
+            error_s.append(
+                "At least one mobile number must be a dialable number "
+                "(a Work number, or a WeChat number rather than a WeChat ID)."
+            )
+
+        return error_s
+
+    def _build_tel_block_and_note(self):
+        tel_lines = [
+            line for entry in self.mobile_entries
+            if (line := entry.to_tel_line()) is not None
+        ]
+        note_parts = [
+            line for entry in self.mobile_entries
+            if (line := entry.note_line()) is not None
+        ]
+
+        if self.presence:
+            note_parts.append(f"Presence: {self.presence}")
+
+        return "".join(tel_lines), "\n".join(note_parts)
+
+    def build(self):
+        """Assemble and return the full vCard 3.0 text. Call validate() first."""
+        tel_block, note = self._build_tel_block_and_note()
+
+        return (
+            "BEGIN:VCARD\r\n"
+            "VERSION:3.0\r\n"
+            f"N:{escape_vcard(self.last_name)};"
+            f"{escape_vcard(self.first_name)};;;\r\n"
+            f"FN:{escape_vcard(self.first_name)} "
+            f"{escape_vcard(self.last_name)}\r\n"
+            f"{tel_block}"
+            f"EMAIL;TYPE=WORK:{escape_vcard(self.email)}\r\n"
+            f"URL:{escape_vcard(self.website)}\r\n"
+            f"ADR;TYPE=WORK:;;"
+            f"{escape_vcard(self.office_address)};;;;\r\n"
+            f"NOTE:{escape_vcard(note)}\r\n"
+            "END:VCARD\r\n"
+        )
+
+
+# ---------------------------------------------------------
+# QRRenderer: turns vCard text into a branded PNG, with the
+# center-logo overlay
+# ---------------------------------------------------------
+
+class QRRenderer:
+
+    def __init__(self, error_correction, scale, border, dark_color, light_color,
+                 logo_p, logo_size_ratio, logo_padding):
+        self.error_correction = error_correction
+        self.scale = scale
+        self.border = border
+        self.dark_color = dark_color
+        self.light_color = light_color
+        self.logo_path = logo_p
+        self.logo_size_ratio = logo_size_ratio
+        self.logo_padding = logo_padding
+
+    @classmethod
+    def from_config(cls, logo_p):
+        """Build a renderer using the shared settings from config.py."""
+        return cls(
+            error_correction=config.QR_ERROR_CORRECTION,
+            scale=config.QR_SCALE,
+            border=config.QR_BORDER,
+            dark_color=config.BRAND_RED,
+            light_color=config.QR_LIGHT_COLOR,
+            logo_p=logo_p,
+            logo_size_ratio=config.LOGO_SIZE_RATIO,
+            logo_padding=config.LOGO_PADDING,
+        )
+
+    def _compose_logo(self, qr_img):
+        """Paste a white-padded, centered logo onto qr_img in place."""
+        logo = Image.open(self.logo_path).convert("RGBA")
+
+        max_logo_width = int(qr_img.width * self.logo_size_ratio)
+        max_logo_height = int(qr_img.height * self.logo_size_ratio)
+        logo.thumbnail((max_logo_width, max_logo_height), Image.Resampling.LANCZOS)
+
+        padding = self.logo_padding
+        logo_bg = Image.new(
+            "RGBA",
+            (logo.width + padding * 2, logo.height + padding * 2),
+            "white"
+        )
+        logo_bg.alpha_composite(logo, (padding, padding))
+
+        x = (qr_img.width - logo_bg.width) // 2
+        y = (qr_img.height - logo_bg.height) // 2
+        qr_img.alpha_composite(logo_bg, (x, y))
+
+    def render(self, vcard_d):
+        """
+        Generate the branded QR PNG for the given vCard text.
+        Returns (img_bytes, logo_found) so the caller can warn the
+        user if the logo file was missing.
+        """
+        qr = segno.make(vcard_d, error=self.error_correction, micro=False)
+
+        qr_buffer = io.BytesIO()
+        qr.save(
+            qr_buffer,
+            kind="png",
+            scale=self.scale,
+            border=self.border,
+            dark=self.dark_color,
+            light=self.light_color
+        )
+        qr_buffer.seek(0)
+
+        qr_img = Image.open(qr_buffer).convert("RGBA")
+
+        logo_f = os.path.exists(self.logo_path)
+        if logo_f:
+            self._compose_logo(qr_img)
+
+        img_buffer = io.BytesIO()
+        qr_img.save(img_buffer, format="PNG")
+
+        return img_buffer.getvalue(), logo_f
 
 
 # ---------------------------------------------------------
@@ -125,21 +367,24 @@ def looks_like_phone_number(value):
 # since add/remove buttons need to rerun immediately)
 # ---------------------------------------------------------
 
-if "mobile_id_counter" not in st.session_state:
-    st.session_state.mobile_id_counter = itertools.count(1)
+if "next_mobile_id" not in st.session_state:
+    st.session_state.next_mobile_id = 1
 
 if "mobile_ids" not in st.session_state:
-    st.session_state.mobile_ids = [next(st.session_state.mobile_id_counter)]
+    st.session_state.mobile_ids = [st.session_state.next_mobile_id]
+    st.session_state.next_mobile_id += 1
 
 
 def add_mobile_row():
-    st.session_state.mobile_ids.append(next(st.session_state.mobile_id_counter))
+    if len(st.session_state.mobile_ids) < config.MAX_MOBILE_ROWS:
+        st.session_state.mobile_ids.append(st.session_state.next_mobile_id)
+        st.session_state.next_mobile_id += 1
 
 
-def remove_mobile_row(mobile_id):
-    st.session_state.mobile_ids.remove(mobile_id)
-    st.session_state.pop(f"mobile_number_{mobile_id}", None)
-    st.session_state.pop(f"mobile_type_{mobile_id}", None)
+def remove_mobile_row(i):
+    st.session_state.mobile_ids.remove(i)
+    st.session_state.pop(f"mobile_number_{i}", None)
+    st.session_state.pop(f"mobile_type_{i}", None)
 
 
 # ---------------------------------------------------------
@@ -162,27 +407,24 @@ with col2:
 
 email = st.text_input(
     "Email Address",
-    placeholder="name@totalmovements.com"
+    placeholder=f"name@{config.ALLOWED_EMAIL_DOMAIN}"
 )
 
 website = st.text_input(
     "Website",
-    value="https://totalmovements.com",
+    value=config.DEFAULT_WEBSITE,
     disabled=True
 )
 
 office_address = st.text_area(
     "Office Address",
-    value=(
-        "402, Malhotra Chambers, Arvind Vithal Gandhi Chowk, "
-        "B.S.D. Marg, Off Govandi Station Road, Mumbai 400088, "
-        "Maharashtra, India"
-    ),
+    value=config.DEFAULT_OFFICE_ADDRESS,
 )
 
 presence = st.text_input(
-    'Presence',
-    value='INDIA | UAE | SAUDI | USA | MALAYSIA | INDONESIA | BANGLADESH'
+    "Presence",
+    value=config.DEFAULT_PRESENCE,
+    help="Editable — update this list if the company's presence changes.",
 )
 
 
@@ -193,7 +435,8 @@ presence = st.text_input(
 st.markdown("**Mobile Numbers**")
 st.caption(
     "Add one or more numbers with country code (e.g. +919876543210) "
-    "and mark each as Work or WeChat."
+    "and mark each as Work or WeChat. "
+    f"Maximum {config.MAX_MOBILE_ROWS} numbers."
 )
 
 for mobile_id in list(st.session_state.mobile_ids):
@@ -240,7 +483,11 @@ for mobile_id in list(st.session_state.mobile_ids):
                 help="Remove this number"
             )
 
-st.button("➕ Add another mobile number", on_click=add_mobile_row)
+st.button(
+    "➕ Add another mobile number",
+    on_click=add_mobile_row,
+    disabled=len(st.session_state.mobile_ids) >= config.MAX_MOBILE_ROWS,
+)
 
 st.divider()
 
@@ -253,224 +500,55 @@ submitted = st.button("Generate Designer QR Code", type="primary")
 
 if submitted:
 
-    # Normalize possible None values
-    first_name = first_name or ""
-    last_name = last_name or ""
+    first_name = (first_name or "").strip()
+    last_name = (last_name or "").strip()
     email = email or ""
     presence = presence or ""
 
-    # Gather mobile entries from session state
-    mobile_entries = []
-    for mobile_id in st.session_state.mobile_ids:
-        number = (st.session_state.get(f"mobile_number_{mobile_id}", "") or "").strip()
-        mtype = st.session_state.get(f"mobile_type_{mobile_id}", "Work")
-        if number:
-            mobile_entries.append({"number": number, "type": mtype})
+    mobile_entries = gather_mobile_entries()
 
-    # Validate required fields
-    if not first_name or not last_name or not mobile_entries:
+    vcard_builder = VCardBuilder(
+        f_name=first_name,
+        l_name=last_name,
+        email_addr=email,
+        c_website=website,
+        address=office_address,
+        pres=presence,
+        mobiles=mobile_entries,
+    )
+    errors = vcard_builder.validate()
 
-        st.error(
-            "⚠️ First Name, Last Name, and at least one Mobile Number "
-            "are required fields!"
-        )
-
+    if errors:
+        for err in errors:
+            st.error(f"⚠️ {err}")
     else:
-        errors = []
+        try:
+            vcard_data = vcard_builder.build()
 
-        # Only Work-type numbers are validated as international
-        # phone numbers. WeChat entries can be an ID or a number in
-        # any format, so no country-code check is applied to them.
-        for entry in mobile_entries:
-            if entry["type"] == "Work":
-                phone_valid, phone_error = validate_phone_number(entry["number"])
-                if not phone_valid:
-                    errors.append(f"'{entry['number']}' (Work) {phone_error}")
+            logo_path = Path(__file__).resolve().parent.joinpath(
+                *config.LOGO_RELATIVE_PATH
+            )
+            qr_renderer = QRRenderer.from_config(logo_path)
+            img_bytes, logo_found = qr_renderer.render(vcard_data)
 
-        email_valid, email_error = validate_email(email)
-        if not email_valid:
-            errors.append(email_error)
-
-        if errors:
-            for err in errors:
-                st.error(f"⚠️ {err}")
-        else:
-            try:
-                # -------------------------------------------------
-                # Build TEL lines.
-                #
-                # Work numbers: standard TYPE=CELL,WORK.
-                #
-                # WeChat numbers: TYPE=WECHAT only (no CELL alongside
-                # it). If a standard type like CELL is included in
-                # the same TYPE list, most Android contact apps match
-                # that recognized token first and show "Mobile"
-                # instead of the custom one. With only an unrecognized
-                # type present, apps typically fall back to showing
-                # the literal token as the label ("Wechat").
-                #
-                # WeChat IDs (non-numeric, e.g. "wxid_xxxxxx") aren't
-                # valid phone field content, so those stay in NOTE
-                # instead of becoming a TEL entry.
-                # -------------------------------------------------
-
-                tel_lines = []
-                note_parts = []
-
-                for entry in mobile_entries:
-                    if entry["type"] == "WeChat":
-                        if looks_like_phone_number(entry["number"]):
-                            number = escape_vcard(entry["number"])
-                            tel_lines.append(f"TEL;TYPE=WeChat:{number}\r\n")
-                        else:
-                            note_parts.append(f'WeChat ID: {entry["number"]}')
-                    else:
-                        number = escape_vcard(entry["number"])
-                        tel_lines.append(f"TEL;TYPE=CELL,WORK:{number}\r\n")
-
-                tel_block = "".join(tel_lines)
-
-                if presence:
-                    note_parts.append(f'Presence: {presence}')
-
-                note = '\n'.join(note_parts)
-
-                # -------------------------------------------------
-                # Build vCard 3.0
-                # -------------------------------------------------
-
-                vcard_data = (
-                    "BEGIN:VCARD\r\n"
-                    "VERSION:3.0\r\n"
-                    f"N:{escape_vcard(last_name)};"
-                    f"{escape_vcard(first_name)};;;\r\n"
-                    f"FN:{escape_vcard(first_name)} "
-                    f"{escape_vcard(last_name)}\r\n"
-                    f"{tel_block}"
-                    f"EMAIL;TYPE=WORK:{escape_vcard(email)}\r\n"
-                    f"URL:{escape_vcard(website)}\r\n"
-                    f"ADR;TYPE=WORK:;;"
-                    f"{escape_vcard(office_address)};;;;\r\n"
-                    f"NOTE:{escape_vcard(note)}\r\n"
-                    "END:VCARD\r\n"
+            if not logo_found:
+                st.warning(
+                    "⚠️ 'logo.png' was not detected. "
+                    "Generated a QR code without the center logo."
                 )
 
-                # -------------------------------------------------
-                # Generate QR
-                # -------------------------------------------------
+            st.session_state["qr_image"] = img_bytes
+            st.session_state["qr_filename"] = (
+                f"TotalMovements_{first_name}_{last_name}_QR.png"
+            )
+            st.session_state["qr_caption"] = (
+                f"Total Movements Card: {first_name} {last_name}"
+            )
 
-                qr = segno.make(
-                    vcard_data,
-                    error="H",
-                    micro=False
-                )
+            st.success("✅ QR Code generated successfully!")
 
-                # -------------------------------------------------
-                # Render QR to PNG
-                # -------------------------------------------------
-
-                qr_buffer = io.BytesIO()
-
-                qr.save(
-                    qr_buffer,
-                    kind="png",
-                    scale=10,
-                    border=4,
-                    dark=BRAND_RED,
-                    light="#FFFFFF"
-                )
-
-                qr_buffer.seek(0)
-
-                qr_img = Image.open(qr_buffer).convert("RGBA")
-
-                # -------------------------------------------------
-                # Add center logo
-                # -------------------------------------------------
-                logo_path = Path(__file__).resolve().parent / 'images' / 'logo.png'
-
-                if os.path.exists(logo_path):
-
-                    logo = Image.open(logo_path).convert("RGBA")
-
-                    # Logo approximately 18% of QR width
-                    max_logo_width = int(qr_img.width * 0.18)
-                    max_logo_height = int(qr_img.height * 0.18)
-
-                    logo.thumbnail(
-                        (max_logo_width, max_logo_height),
-                        Image.Resampling.LANCZOS
-                    )
-
-                    # White background around logo
-                    padding = 12
-
-                    logo_bg = Image.new(
-                        "RGBA",
-                        (
-                            logo.width + padding * 2,
-                            logo.height + padding * 2
-                        ),
-                        "white"
-                    )
-
-                    logo_bg.alpha_composite(
-                        logo,
-                        (padding, padding)
-                    )
-
-                    # Center logo
-                    x = (qr_img.width - logo_bg.width) // 2
-                    y = (qr_img.height - logo_bg.height) // 2
-
-                    qr_img.alpha_composite(
-                        logo_bg,
-                        (x, y)
-                    )
-
-                else:
-
-                    st.warning(
-                        "⚠️ 'logo.png' was not detected. "
-                        "Generated a QR code without the center logo."
-                    )
-
-                # -------------------------------------------------
-                # Convert final image to PNG bytes
-                # -------------------------------------------------
-
-                img_buffer = io.BytesIO()
-
-                qr_img.save(
-                    img_buffer,
-                    format="PNG"
-                )
-
-                img_bytes = img_buffer.getvalue()
-
-                # -------------------------------------------------
-                # Store QR in session state
-                # -------------------------------------------------
-
-                st.session_state["qr_image"] = img_bytes
-                st.session_state["qr_filename"] = (
-                    f"TotalMovements_"
-                    f"{first_name}_{last_name}_QR.png"
-                )
-                st.session_state["qr_caption"] = (
-                    f"Total Movements Card: "
-                    f"{first_name} {last_name}"
-                )
-
-                st.success(
-                    "✅ QR Code generated successfully!"
-                )
-
-            except Exception as e:
-
-                st.error(
-                    f"An unexpected technical problem occurred: {e}"
-                )
+        except Exception as e:
+            st.error(f"An unexpected technical problem occurred: {e}")
 
 
 # ---------------------------------------------------------
